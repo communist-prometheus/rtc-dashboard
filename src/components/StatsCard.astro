@@ -1,0 +1,56 @@
+---
+interface Props {
+  readonly label: string;
+  readonly value: string;
+  readonly variant?: 'default' | 'success' | 'warning' | 'error' | undefined;
+}
+
+const { label, value, variant = 'default' } = Astro.props;
+---
+
+<article class:list={['stats-card', variant]} aria-label={`${label}: ${value}`}>
+  <dt class="label">{label}</dt>
+  <dd class="value">{value}</dd>
+</article>
+
+<style>
+  .stats-card {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: var(--spacing-md);
+    transition: box-shadow var(--transition-fast);
+  }
+
+  .stats-card:hover {
+    box-shadow: var(--shadow-md);
+  }
+
+  .stats-card.success {
+    border-inline-start: 3px solid var(--color-success);
+  }
+
+  .stats-card.warning {
+    border-inline-start: 3px solid var(--color-warning);
+  }
+
+  .stats-card.error {
+    border-inline-start: 3px solid var(--color-error);
+  }
+
+  .label {
+    font-size: 0.8125rem;
+    font-weight: 500;
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .value {
+    font-size: 2rem;
+    font-weight: 700;
+    line-height: 1.2;
+    margin-block-start: var(--spacing-xs);
+    font-variant-numeric: tabular-nums;
+  }
+</style>
