@@ -1,0 +1,584 @@
+---
+import DashboardLayout from '@/layouts/DashboardLayout.astro';
+---
+
+<DashboardLayout title="Room detail" description="Room telemetry detail">
+  <nav class="breadcrumb" aria-label="Breadcrumb">
+    <ol>
+      <li><a href="/">Dashboard</a></li>
+      <li aria-current="page" id="crumb-current">Room…</li>
+    </ol>
+  </nav>
+
+  <p class="loading" id="loading">Loading room…</p>
+
+  <section class="error-state" id="error-state" hidden>
+    <h1>Room Not Found</h1>
+    <p>Could not load telemetry data for room <code id="error-room-id"></code>. The telemetry API may be unavailable.</p>
+    <a href="/" class="back-link">Back to Dashboard</a>
+  </section>
+
+  <article id="room-article" hidden>
+    <header class="page-header">
+      <h1 class="room-title">
+        Room <code id="room-id"></code>
+        <mark class="live-badge" id="live-badge" hidden>Live</mark>
+      </h1>
+      <dl class="room-meta">
+        <dt>Created</dt>
+        <dd><time id="room-created"></time></dd>
+        <dt id="closed-label" hidden>Closed</dt>
+        <dd id="closed-value" hidden><time id="room-closed"></time></dd>
+        <dt>Connections</dt>
+        <dd id="connection-count">0</dd>
+      </dl>
+    </header>
+
+    <section class="timeline-section" aria-label="Connection timeline">
+      <h2 class="section-heading">Connection Timeline</h2>
+      <div class="timeline" id="timeline"></div>
+      <p class="empty-state" id="timeline-empty" hidden>No connections recorded.</p>
+    </section>
+
+    <section class="ice-section" aria-label="ICE events log">
+      <h2 class="section-heading">ICE Events</h2>
+      <p class="empty-state" id="ice-empty" hidden>No ICE events recorded.</p>
+      <figure class="table-wrapper" id="ice-wrapper" hidden>
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Timestamp</th>
+              <th scope="col">Type</th>
+              <th scope="col">Candidate</th>
+              <th scope="col">Protocol</th>
+              <th scope="col">Address</th>
+            </tr>
+          </thead>
+          <tbody id="ice-tbody"></tbody>
+        </table>
+      </figure>
+    </section>
+
+    <section class="quality-section" aria-label="Quality metrics chart">
+      <h2 class="section-heading">Quality Metrics</h2>
+      <figure class="chart-container">
+        <canvas id="quality-chart" aria-label="Quality metrics over time" role="img">
+          Quality metrics chart placeholder.
+        </canvas>
+      </figure>
+    </section>
+  </article>
+</DashboardLayout>
+
+<script>
+  import { Chart, registerables } from 'chart.js'
+  import { fetchRoomDetail } from '@/services/telemetry-api'
+  import { formatDateTime, formatDuration } from '@/helpers/format'
+  import type {
+    ConnectionEvent,
+    QualityMetric,
+    RoomDetail,
+  } from '@/models/telemetry'
+
+  Chart.register(...registerables)
+
+  const REFRESH_MS = 5_000
+  let chart: Chart | undefined
+
+  const $ = <T extends HTMLElement>(id: string): T | null =>
+    document.getElementById(id) as T | null
+
+  const getRoomIdFromUrl = (): string => {
+    const params = new URLSearchParams(globalThis.location.search)
+    return params.get('id')?.trim() ?? ''
+  }
+
+  const showError = (id: string): void => {
+    const loading = $('loading')
+    const error = $<HTMLElement>('error-state')
+    const errCode = $('error-room-id')
+    if (loading) loading.hidden = true
+    if (error) error.hidden = false
+    if (errCode) errCode.textContent = id
+  }
+
+  const renderTimeline = (
+    connections: readonly ConnectionEvent[],
+    roomStart: string,
+    roomEnd: string | undefined
+  ): void => {
+    const timeline = $('timeline')
+    const empty = $('timeline-empty')
+    if (!timeline || !empty) return
+    if (connections.length === 0) {
+      timeline.innerHTML = ''
+      empty.hidden = false
+      return
+    }
+    empty.hidden = true
+    timeline.innerHTML = ''
+    const startMs = new Date(roomStart).getTime()
+    const endMs = roomEnd ? new Date(roomEnd).getTime() : Date.now()
+    const durationMs = Math.max(endMs - startMs, 1)
+    for (const c of connections) {
+      const row = document.createElement('div')
+      row.className = 'timeline-row'
+
+      const label = document.createElement('span')
+      label.className = 'timeline-label'
+      label.textContent = c.displayName
+      row.appendChild(label)
+
+      const track = document.createElement('div')
+      track.className = 'timeline-track'
+
+      const bar = document.createElement('div')
+      bar.className = 'timeline-bar'
+      const joinMs = new Date(c.joinedAt).getTime()
+      const leaveMs = c.leftAt ? new Date(c.leftAt).getTime() : endMs
+      const leftPct = Math.max(0, ((joinMs - startMs) / durationMs) * 100)
+      const widthPct = Math.min(
+        100 - leftPct,
+        ((leaveMs - joinMs) / durationMs) * 100
+      )
+      bar.style.insetInlineStart = `${String(leftPct)}%`
+      bar.style.inlineSize = `${String(widthPct)}%`
+      bar.title =
+        `${c.displayName}: ${formatDuration(c.joinedAt, c.leftAt)}`
+
+      track.appendChild(bar)
+      row.appendChild(track)
+      timeline.appendChild(row)
+    }
+  }
+
+  const renderIceEvents = (
+    events: RoomDetail['iceEvents']
+  ): void => {
+    const empty = $('ice-empty')
+    const wrapper = $<HTMLElement>('ice-wrapper')
+    const tbody = $('ice-tbody')
+    if (!empty || !wrapper || !tbody) return
+    if (events.length === 0) {
+      empty.hidden = false
+      wrapper.hidden = true
+      return
+    }
+    empty.hidden = true
+    wrapper.hidden = false
+    tbody.innerHTML = ''
+    for (const e of events) {
+      const tr = document.createElement('tr')
+      tr.append(
+        cell(
+          (() => {
+            const t = document.createElement('time')
+            t.dateTime = e.timestamp
+            t.textContent = formatDateTime(e.timestamp)
+            return t
+          })()
+        ),
+        codeCell(e.type),
+        textCell(e.candidateType),
+        codeCell(e.protocol),
+        codeCell(e.address)
+      )
+      tbody.appendChild(tr)
+    }
+  }
+
+  const cell = (child: Node): HTMLTableCellElement => {
+    const td = document.createElement('td')
+    td.appendChild(child)
+    return td
+  }
+  const textCell = (text: string): HTMLTableCellElement => {
+    const td = document.createElement('td')
+    td.textContent = text
+    return td
+  }
+  const codeCell = (text: string): HTMLTableCellElement => {
+    const td = document.createElement('td')
+    const code = document.createElement('code')
+    code.textContent = text
+    td.appendChild(code)
+    return td
+  }
+
+  const renderQualityChart = (
+    metrics: readonly QualityMetric[]
+  ): void => {
+    const canvas = $<HTMLCanvasElement>('quality-chart')
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+    const rootStyles = getComputedStyle(document.documentElement)
+    const accent = rootStyles.getPropertyValue('--color-accent').trim()
+    const success = rootStyles.getPropertyValue('--color-success').trim()
+    const warning = rootStyles.getPropertyValue('--color-warning').trim()
+    const text = rootStyles.getPropertyValue('--color-text-secondary').trim()
+    const border = rootStyles.getPropertyValue('--color-border').trim()
+
+    const labels = metrics.map(m =>
+      new Date(m.timestamp).toLocaleTimeString()
+    )
+    const data = {
+      labels,
+      datasets: [
+        {
+          label: 'Bitrate (kbps)',
+          data: metrics.map(m => m.bitrate),
+          borderColor: accent,
+          backgroundColor: 'transparent',
+          yAxisID: 'y',
+          tension: 0.3,
+          pointRadius: 2,
+        },
+        {
+          label: 'Packet Loss (%)',
+          data: metrics.map(m => m.packetLoss),
+          borderColor: warning,
+          backgroundColor: 'transparent',
+          yAxisID: 'y1',
+          tension: 0.3,
+          pointRadius: 2,
+        },
+        {
+          label: 'RTT (ms)',
+          data: metrics.map(m => m.roundTripTime),
+          borderColor: success,
+          backgroundColor: 'transparent',
+          yAxisID: 'y1',
+          tension: 0.3,
+          pointRadius: 2,
+        },
+      ],
+    }
+
+    if (chart) {
+      chart.data = data
+      chart.update('none')
+      return
+    }
+
+    chart = new Chart(ctx, {
+      type: 'line',
+      data,
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: {
+          legend: {
+            labels: {
+              color: text,
+              font: { family: 'system-ui, sans-serif' },
+            },
+          },
+        },
+        scales: {
+          x: {
+            ticks: { color: text },
+            grid: { color: border },
+          },
+          y: {
+            type: 'linear',
+            position: 'left',
+            beginAtZero: true,
+            title: { display: true, text: 'Bitrate (kbps)', color: text },
+            ticks: { color: text },
+            grid: { color: border },
+          },
+          y1: {
+            type: 'linear',
+            position: 'right',
+            beginAtZero: true,
+            title: { display: true, text: 'Loss (%) / RTT (ms)', color: text },
+            ticks: { color: text },
+            grid: { drawOnChartArea: false },
+          },
+        },
+      },
+    })
+  }
+
+  const renderRoom = (room: RoomDetail): void => {
+    const loading = $('loading')
+    const article = $<HTMLElement>('room-article')
+    if (loading) loading.hidden = true
+    if (article) article.hidden = false
+
+    const crumb = $('crumb-current')
+    if (crumb) crumb.textContent = `Room ${room.roomId}`
+    const idEl = $('room-id')
+    if (idEl) idEl.textContent = room.roomId
+    const liveBadge = $('live-badge')
+    if (liveBadge) liveBadge.hidden = Boolean(room.closedAt)
+
+    const created = $<HTMLTimeElement>('room-created')
+    if (created) {
+      created.dateTime = room.createdAt
+      created.textContent = formatDateTime(room.createdAt)
+    }
+    if (room.closedAt) {
+      const closedLabel = $('closed-label')
+      const closedValue = $('closed-value')
+      const closedTime = $<HTMLTimeElement>('room-closed')
+      if (closedLabel) closedLabel.hidden = false
+      if (closedValue) closedValue.hidden = false
+      if (closedTime) {
+        closedTime.dateTime = room.closedAt
+        closedTime.textContent = formatDateTime(room.closedAt)
+      }
+    }
+    const count = $('connection-count')
+    if (count) count.textContent = String(room.connections.length)
+
+    renderTimeline(room.connections, room.createdAt, room.closedAt)
+    renderIceEvents(room.iceEvents)
+    renderQualityChart(room.qualityMetrics)
+  }
+
+  const refresh = async (): Promise<void> => {
+    const id = getRoomIdFromUrl()
+    if (!id) {
+      showError('(missing)')
+      return
+    }
+    const room = await fetchRoomDetail(id)
+    if (!room) {
+      // Only show the error on first attempt — subsequent failures
+      // keep the last successful render in place.
+      if ($<HTMLElement>('room-article')?.hidden !== false) {
+        showError(id)
+      }
+      return
+    }
+    renderRoom(room)
+  }
+
+  void refresh()
+  setInterval(() => { void refresh() }, REFRESH_MS)
+  document.addEventListener('astro:after-swap', () => { void refresh() })
+</script>
+
+<style>
+  .breadcrumb ol {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-xs);
+    list-style: none;
+    padding: 0;
+    font-size: 0.875rem;
+    color: var(--color-text-secondary);
+    margin-block-end: var(--spacing-md);
+  }
+
+  .breadcrumb li:not(:last-child)::after {
+    content: '/';
+    margin-inline-start: var(--spacing-xs);
+    color: var(--color-text-secondary);
+  }
+
+  .breadcrumb a { color: var(--color-accent); }
+  .breadcrumb a:hover { text-decoration: underline; }
+  .breadcrumb a:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+    border-radius: 0.125rem;
+  }
+
+  .loading {
+    color: var(--color-text-secondary);
+    padding: var(--spacing-lg);
+  }
+
+  .error-state {
+    text-align: center;
+    padding: var(--spacing-2xl);
+  }
+
+  .error-state h1 {
+    font-size: 1.5rem;
+    margin-block-end: var(--spacing-sm);
+  }
+
+  .error-state p {
+    color: var(--color-text-secondary);
+    margin-block-end: var(--spacing-md);
+  }
+
+  .error-state code {
+    font-family: var(--font-mono);
+    background: var(--color-surface);
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.25rem;
+  }
+
+  .back-link {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--spacing-xs);
+    padding: var(--spacing-xs) var(--spacing-md);
+    background: var(--color-accent);
+    color: var(--color-on-accent);
+    border-radius: var(--radius-sm);
+    font-weight: 500;
+    text-decoration: none;
+    transition: background var(--transition-fast);
+  }
+
+  .back-link:hover { background: var(--color-accent-hover); }
+  .back-link:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+
+  .page-header { margin-block-end: var(--spacing-lg); }
+
+  .room-title {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    font-size: 1.5rem;
+    font-weight: 700;
+  }
+
+  .room-title code {
+    font-family: var(--font-mono);
+    font-size: 1.25rem;
+  }
+
+  .live-badge {
+    background: var(--color-success);
+    color: white;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0.125rem 0.5rem;
+    border-radius: 1rem;
+  }
+
+  .room-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--spacing-xs) var(--spacing-md);
+    margin-block-start: var(--spacing-xs);
+    font-size: 0.875rem;
+    color: var(--color-text-secondary);
+  }
+
+  .room-meta dt {
+    font-weight: 600;
+    color: var(--color-text-primary);
+  }
+
+  .room-meta dd { margin-inline-end: var(--spacing-sm); }
+
+  .timeline-section,
+  .ice-section,
+  .quality-section { margin-block-end: var(--spacing-xl); }
+
+  .section-heading {
+    font-size: 1.125rem;
+    font-weight: 600;
+    margin-block-end: var(--spacing-sm);
+  }
+
+  .timeline {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-xs);
+  }
+
+  .timeline-row {
+    display: grid;
+    grid-template-columns: 8rem 1fr;
+    gap: var(--spacing-sm);
+    align-items: center;
+  }
+
+  .timeline-label {
+    font-size: 0.8125rem;
+    color: var(--color-text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .timeline-track {
+    position: relative;
+    block-size: 1.5rem;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-sm);
+  }
+
+  .timeline-bar {
+    position: absolute;
+    inset-block: 0;
+    background: var(--color-accent);
+    border-radius: var(--radius-sm);
+  }
+
+  .empty-state {
+    color: var(--color-text-secondary);
+    font-style: italic;
+    padding: var(--spacing-md);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+  }
+
+  .table-wrapper {
+    overflow-x: auto;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8125rem;
+  }
+
+  thead { background: var(--color-surface); }
+
+  th {
+    text-align: start;
+    padding: var(--spacing-xs) var(--spacing-sm);
+    font-weight: 600;
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-size: 0.6875rem;
+    border-block-end: 1px solid var(--color-border);
+    white-space: nowrap;
+  }
+
+  td {
+    padding: var(--spacing-xs) var(--spacing-sm);
+    border-block-end: 1px solid var(--color-border);
+    white-space: nowrap;
+  }
+
+  td code {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    background: var(--color-surface);
+    padding: 0.0625rem 0.25rem;
+    border-radius: 0.25rem;
+  }
+
+  tbody tr:last-child td { border-block-end: none; }
+
+  .chart-container {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius-md);
+    padding: var(--spacing-md);
+    height: 22rem;
+    position: relative;
+  }
+</style>

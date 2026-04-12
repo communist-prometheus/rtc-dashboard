@@ -1,15 +1,6 @@
 ---
 import DashboardLayout from '@/layouts/DashboardLayout.astro';
 import StatsCard from '@/components/StatsCard.astro';
-import { fetchRoomStats, fetchRecentSessions } from '@/services/telemetry-api';
-import { formatNumber, formatDateTime, formatDuration } from '@/helpers/format';
-
-const stats = await fetchRoomStats();
-const sessions = await fetchRecentSessions();
-
-const totalRooms = stats ? formatNumber(stats.totalRooms) : '--';
-const activeRooms = stats ? formatNumber(stats.activeRooms) : '--';
-const totalConnections = stats ? formatNumber(stats.totalConnections) : '--';
 ---
 
 <DashboardLayout title="Overview" description="Telemetry overview for rtc-less WebRTC sessions">
@@ -19,122 +10,127 @@ const totalConnections = stats ? formatNumber(stats.totalConnections) : '--';
   </header>
 
   <section aria-label="Key metrics">
-    <dl class="stats-grid">
-      <StatsCard label="Total Rooms" value={totalRooms} />
-      <StatsCard label="Active Rooms" value={activeRooms} variant="success" />
-      <StatsCard label="Total Connections" value={totalConnections} />
+    <dl class="stats-grid" id="stats-grid">
+      <StatsCard label="Total Rooms" value="--" />
+      <StatsCard label="Active Rooms" value="--" variant="success" />
+      <StatsCard label="Total Connections" value="--" />
     </dl>
-  </section>
-
-  <section class="chart-section" aria-label="Room activity chart">
-    <h2 class="section-heading">Room Activity</h2>
-    <figure class="chart-container">
-      <canvas id="room-activity-chart" aria-label="Room activity over time chart" role="img">
-        Room activity line chart placeholder - data not yet loaded.
-      </canvas>
-    </figure>
   </section>
 
   <section class="sessions-section" aria-label="Recent room sessions">
     <h2 class="section-heading">Recent Sessions</h2>
-
-    {!sessions || sessions.length === 0 ? (
-      <p class="empty-state">No recent sessions found. The telemetry API may be unavailable.</p>
-    ) : (
-      <ul class="sessions-list" role="list">
-        {sessions.map((session) => (
-          <li>
-            <a href={`/rooms/${session.roomId}`} class="session-card">
-              <header class="session-header">
-                <strong class="room-id">{session.roomId}</strong>
-                {!session.closedAt && <mark class="live-badge">Live</mark>}
-              </header>
-              <dl class="session-meta">
-                <dt class="visually-hidden">Started</dt>
-                <dd>
-                  <time datetime={session.createdAt}>{formatDateTime(session.createdAt)}</time>
-                </dd>
-                <dt class="visually-hidden">Duration</dt>
-                <dd class="duration">{formatDuration(session.createdAt, session.closedAt)}</dd>
-                <dt class="visually-hidden">Participants</dt>
-                <dd class="participants">
-                  {session.participantCount}
-                  {session.participantCount === 1 ? ' user' : ' users'}
-                </dd>
-              </dl>
-            </a>
-          </li>
-        ))}
-      </ul>
-    )}
+    <p class="empty-state" id="sessions-empty" hidden>No recent sessions yet — open a room and the entry will appear here within seconds.</p>
+    <p class="empty-state" id="sessions-loading">Loading sessions…</p>
+    <p class="empty-state" id="sessions-error" hidden>Telemetry API unreachable. <a href="https://telemetry.comprom.org/health">Check health endpoint</a>.</p>
+    <ul class="sessions-list" id="sessions-list" role="list" hidden></ul>
   </section>
 </DashboardLayout>
 
 <script>
-  import { Chart, registerables } from 'chart.js';
+  import {
+    fetchRoomStats,
+    fetchRecentSessions,
+  } from '@/services/telemetry-api'
+  import { formatNumber, formatDateTime, formatDuration } from '@/helpers/format'
+  import type { RoomSession } from '@/models/telemetry'
 
-  Chart.register(...registerables);
+  const REFRESH_MS = 5_000
 
-  const initChart = (): void => {
-    const canvas = document.getElementById('room-activity-chart');
-    if (!(canvas instanceof HTMLCanvasElement)) return;
+  const setStat = (label: string, value: string): void => {
+    const cards = document.querySelectorAll<HTMLElement>(
+      '#stats-grid > .stats-card'
+    )
+    for (const card of cards) {
+      const dt = card.querySelector('dt')
+      if (dt?.textContent?.trim() === label) {
+        const dd = card.querySelector('dd')
+        if (dd) dd.textContent = value
+      }
+    }
+  }
 
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
+  const renderSessions = (sessions: readonly RoomSession[]): void => {
+    const list = document.getElementById('sessions-list')
+    const empty = document.getElementById('sessions-empty')
+    const loading = document.getElementById('sessions-loading')
+    if (!list || !empty || !loading) return
+    loading.hidden = true
+    if (sessions.length === 0) {
+      empty.hidden = false
+      list.hidden = true
+      return
+    }
+    empty.hidden = true
+    list.hidden = false
+    list.innerHTML = ''
+    for (const s of sessions) {
+      const li = document.createElement('li')
+      const a = document.createElement('a')
+      a.className = 'session-card'
+      a.href = `/rooms?id=${encodeURIComponent(s.roomId)}`
 
-    const labels = Array.from({ length: 24 }, (_, i) => `${String(i).padStart(2, '0')}:00`);
-    const placeholderData = labels.map(() => Math.floor(Math.random() * 10));
+      const header = document.createElement('header')
+      header.className = 'session-header'
+      const strong = document.createElement('strong')
+      strong.className = 'room-id'
+      strong.textContent = s.roomId
+      header.appendChild(strong)
+      if (!s.closedAt) {
+        const live = document.createElement('mark')
+        live.className = 'live-badge'
+        live.textContent = 'Live'
+        header.appendChild(live)
+      }
 
-    const rootStyles = getComputedStyle(document.documentElement);
-    const accentColor = rootStyles.getPropertyValue('--color-accent').trim();
-    const textSecondary = rootStyles.getPropertyValue('--color-text-secondary').trim();
-    const borderColor = rootStyles.getPropertyValue('--color-border').trim();
+      const dl = document.createElement('dl')
+      dl.className = 'session-meta'
+      const created = document.createElement('dd')
+      const time = document.createElement('time')
+      time.dateTime = s.createdAt
+      time.textContent = formatDateTime(s.createdAt)
+      created.appendChild(time)
+      const duration = document.createElement('dd')
+      duration.className = 'duration'
+      duration.textContent = formatDuration(s.createdAt, s.closedAt)
+      const participants = document.createElement('dd')
+      participants.className = 'participants'
+      participants.textContent =
+        `${String(s.participantCount)} ${s.participantCount === 1 ? 'user' : 'users'}`
+      dl.append(created, duration, participants)
 
-    new Chart(ctx, {
-      type: 'line',
-      data: {
-        labels,
-        datasets: [
-          {
-            label: 'Active Rooms',
-            data: placeholderData,
-            borderColor: accentColor,
-            backgroundColor: `${accentColor}20`,
-            fill: true,
-            tension: 0.3,
-            pointRadius: 2,
-            pointHoverRadius: 5,
-          },
-        ],
-      },
-      options: {
-        responsive: true,
-        maintainAspectRatio: false,
-        plugins: {
-          legend: {
-            labels: {
-              color: textSecondary,
-              font: { family: 'system-ui, sans-serif' },
-            },
-          },
-        },
-        scales: {
-          x: {
-            ticks: { color: textSecondary },
-            grid: { color: borderColor },
-          },
-          y: {
-            beginAtZero: true,
-            ticks: { color: textSecondary },
-            grid: { color: borderColor },
-          },
-        },
-      },
-    });
-  };
+      a.append(header, dl)
+      li.append(a)
+      list.append(li)
+    }
+  }
 
-  initChart();
-  document.addEventListener('astro:after-swap', initChart);
+  const showError = (): void => {
+    const loading = document.getElementById('sessions-loading')
+    const error = document.getElementById('sessions-error')
+    if (loading) loading.hidden = true
+    if (error) error.hidden = false
+  }
+
+  const refresh = async (): Promise<void> => {
+    const [stats, sessions] = await Promise.all([
+      fetchRoomStats(),
+      fetchRecentSessions(),
+    ])
+    if (!stats && !sessions) {
+      showError()
+      return
+    }
+    if (stats) {
+      setStat('Total Rooms', formatNumber(stats.totalRooms))
+      setStat('Active Rooms', formatNumber(stats.activeRooms))
+      setStat('Total Connections', formatNumber(stats.totalConnections))
+    }
+    if (sessions) renderSessions(sessions)
+  }
+
+  void refresh()
+  setInterval(() => { void refresh() }, REFRESH_MS)
+  document.addEventListener('astro:after-swap', () => { void refresh() })
 </script>
 
 <style>
@@ -167,19 +163,6 @@ const totalConnections = stats ? formatNumber(stats.totalConnections) : '--';
     margin-block-end: var(--spacing-sm);
   }
 
-  .chart-section {
-    margin-block-end: var(--spacing-xl);
-  }
-
-  .chart-container {
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius-md);
-    padding: var(--spacing-md);
-    height: 20rem;
-    position: relative;
-  }
-
   .sessions-section {
     margin-block-end: var(--spacing-xl);
   }
@@ -209,6 +192,7 @@ const totalConnections = stats ? formatNumber(stats.totalConnections) : '--';
     border-radius: var(--radius-md);
     padding: var(--spacing-sm) var(--spacing-md);
     color: var(--color-text-primary);
+    text-decoration: none;
     transition:
       box-shadow var(--transition-fast),
       border-color var(--transition-fast);
@@ -260,17 +244,5 @@ const totalConnections = stats ? formatNumber(stats.totalConnections) : '--';
 
   .participants {
     font-weight: 500;
-  }
-
-  .visually-hidden {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    padding: 0;
-    margin: -1px;
-    overflow: hidden;
-    clip: rect(0, 0, 0, 0);
-    white-space: nowrap;
-    border-width: 0;
   }
 </style>
